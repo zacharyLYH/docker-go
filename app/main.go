@@ -11,17 +11,18 @@ Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
 mydocker run ubuntu:latest /usr/local/bin/docker-explorer echo hey
 */
 func main() {
-	fmt.Println("Logs from your program will appear here!")
 
 	command := os.Args[3]
 	args := os.Args[4:len(os.Args)]
 
 	cmd := exec.Command(command, args...)
-	output, err := cmd.Output()
+
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+
+	err := cmd.Run()
 	if err != nil {
-		fmt.Printf("Err: %v", err)
+		fmt.Println(err)
 		os.Exit(1)
 	}
-
-	fmt.Println(string(output))
 }
