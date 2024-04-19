@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -14,6 +16,7 @@ mydocker run ubuntu:latest /usr/local/bin/docker-explorer echo hey
 */
 func main() {
 
+	image := os.Args[2]
 	command := os.Args[3]
 	args := os.Args[4:len(os.Args)]
 
@@ -30,13 +33,68 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The path where the binary should be copied
-	binaryPath := filepath.Join(tempDir, filepath.Base(command))
+	if command == "docker-explorer" {
+		// The path where the binary should be copied
+		binaryPath := filepath.Join(tempDir, filepath.Base(command))
 
-	//copy command (name of file with functionality) into binaryPath (path that points to the tmp directory)
-	if err := copyFile(command, binaryPath); err != nil {
-		fmt.Println("Failed to copy binary:", err)
-		os.Exit(1)
+		//copy command (name of file with functionality) into binaryPath (path that points to the tmp directory)
+		if err := copyFile(command, binaryPath); err != nil {
+			fmt.Println("Failed to copy binary:", err)
+			os.Exit(1)
+		}
+	} else {
+		token, err := getAuthToken()
+		if err != nil {
+			fmt.Println("Failed to get auth token:", err)
+			os.Exit(1)
+		} else {
+			fmt.Println("Successfully got auth token: ")
+		}
+
+		parts := strings.Split(image, ":")
+		tag := "latest" // Default tag
+		if len(parts) > 1 {
+			tag = parts[1] // Use the specified tag if available
+		}
+
+		manifestData, err := getImageManifest(token, parts[0], tag)
+		if err != nil {
+			fmt.Println("Failed to get image manifest:", err)
+			os.Exit(1)
+		} else {
+			fmt.Println("Successfully got image manifest: ")
+		}
+
+		var manifest struct {
+			Manifests []struct {
+				Digest    string `json:"digest"`
+				MediaType string `json:"mediaType"`
+				Platform  struct {
+					Architecture string `json:"architecture"`
+					OS           string `json:"os"`
+					Variant      string `json:"variant,omitempty"`
+				} `json:"platform"`
+				Size int `json:"size"`
+			} `json:"manifests"`
+			MediaType     string `json:"mediaType"`
+			SchemaVersion int    `json:"schemaVersion"`
+			Digest        string `json:"digest"`
+		}
+
+		if err := json.Unmarshal(manifestData, &manifest); err != nil {
+			fmt.Println("Failed to parse manifest:", err)
+		} else {
+			fmt.Println("Successfully unmarshaled manifest data.", manifest)
+		}
+
+		for _, layer := range manifest.Manifests {
+			if err := pullLayer(token, layer.Digest, tempDir, parts[0], layer.MediaType); err != nil {
+				fmt.Println("Failed to pull and extract layer:", err)
+				os.Exit(1)
+			} else {
+				fmt.Println("Successfully pulled and extracted layer: ", layer.Digest)
+			}
+		}
 	}
 
 	// /tmp/mydocker1515083054/docker-explorer
