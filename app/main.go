@@ -43,18 +43,17 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		token, err := getAuthToken()
+		parts := strings.Split(image, ":")
+		tag := "latest" // Default tag
+		if len(parts) > 1 {
+			tag = parts[1] // Use the specified tag if available
+		}
+		token, err := getAuthToken(parts[0])
 		if err != nil {
 			fmt.Println("Failed to get auth token:", err)
 			os.Exit(1)
 		} else {
 			fmt.Println("Successfully got auth token: ")
-		}
-
-		parts := strings.Split(image, ":")
-		tag := "latest" // Default tag
-		if len(parts) > 1 {
-			tag = parts[1] // Use the specified tag if available
 		}
 
 		manifestData, err := getImageManifest(token, parts[0], tag)

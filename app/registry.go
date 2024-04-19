@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 )
 
-func getAuthToken() (string, error) {
+func getAuthToken(image string) (string, error) {
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/ubuntu:pull", nil)
+
+	url := fmt.Sprintf("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/%s:pull", image)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
 	}
