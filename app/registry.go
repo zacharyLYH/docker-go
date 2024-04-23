@@ -74,7 +74,7 @@ func pullLayer(token, layerDigest string, dir string, imageName string, mediaTyp
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		fmt.Printf("Failed to pull layer: %s, Response: %s\n", resp.Status, string(body))
+		fmt.Printf("\n\nIn pullLayer(): Failed to pull layer: %s, Response: %s\n", resp.Status, string(body))
 		return fmt.Errorf("failed to pull layer, status code: %d", resp.StatusCode)
 	}
 

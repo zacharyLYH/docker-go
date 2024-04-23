@@ -53,7 +53,7 @@ func main() {
 			fmt.Println("Failed to get auth token:", err)
 			os.Exit(1)
 		} else {
-			fmt.Println("Successfully got auth token: ")
+			fmt.Println("\n\nSuccessfully got auth token ")
 		}
 
 		manifestData, err := getImageManifest(token, parts[0], tag)
@@ -61,7 +61,7 @@ func main() {
 			fmt.Println("Failed to get image manifest:", err)
 			os.Exit(1)
 		} else {
-			fmt.Println("Successfully got image manifest: ")
+			fmt.Println("\n\nSuccessfully got image manifest ")
 		}
 
 		var manifest struct {
@@ -83,7 +83,7 @@ func main() {
 		if err := json.Unmarshal(manifestData, &manifest); err != nil {
 			fmt.Println("Failed to parse manifest:", err)
 		} else {
-			fmt.Println("Successfully unmarshaled manifest data.", manifest)
+			fmt.Println("\n\nSuccessfully unmarshaled manifest data.", manifest)
 		}
 
 		for _, layer := range manifest.Manifests {
@@ -91,7 +91,7 @@ func main() {
 				fmt.Println("Failed to pull and extract layer:", err)
 				os.Exit(1)
 			} else {
-				fmt.Println("Successfully pulled and extracted layer: ", layer.Digest)
+				fmt.Println("\n\nSuccessfully pulled and extracted layer: ", layer.Digest)
 			}
 		}
 	}
