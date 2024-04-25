@@ -1,173 +1,100 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
+	"path"
 	"syscall"
 )
 
-/*
-Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
-mydocker run ubuntu:latest /usr/local/bin/docker-explorer echo hey
-*/
+// Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
 func main() {
-
 	image := os.Args[2]
-	command := os.Args[3]
-	args := os.Args[4:len(os.Args)]
+	imageDir := fmt.Sprintf("./images/%s", image)
 
-	tempDir, err := os.MkdirTemp("", "mydocker")
-	if err != nil {
-		fmt.Printf("Error creating temp directory: %s\n", err)
-		os.Exit(1)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Make sure the directory is executable
-	if err := os.Chmod(tempDir, 0755); err != nil {
-		fmt.Println("Error setting permissions:", err)
-		os.Exit(1)
-	}
-
-	if command == "docker-explorer" {
-		// The path where the binary should be copied
-		binaryPath := filepath.Join(tempDir, filepath.Base(command))
-
-		//copy command (name of file with functionality) into binaryPath (path that points to the tmp directory)
-		if err := copyFile(command, binaryPath); err != nil {
-			fmt.Println("Failed to copy binary:", err)
-			os.Exit(1)
-		}
-	} else {
-		parts := strings.Split(image, ":")
-		tag := "latest" // Default tag
-		if len(parts) > 1 {
-			tag = parts[1] // Use the specified tag if available
-		}
-		token, err := getAuthToken(parts[0])
-		if err != nil {
-			fmt.Println("Failed to get auth token:", err)
-			os.Exit(1)
-		} else {
-			fmt.Println("\n\nSuccessfully got auth token ")
-		}
-
-		manifestData, err := getImageManifest(token, parts[0], tag)
-		if err != nil {
-			fmt.Println("Failed to get image manifest:", err)
-			os.Exit(1)
-		} else {
-			fmt.Println("\n\nSuccessfully got image manifest ")
-		}
-
-		var manifest struct {
-			Manifests []struct {
-				Digest    string `json:"digest"`
-				MediaType string `json:"mediaType"`
-				Platform  struct {
-					Architecture string `json:"architecture"`
-					OS           string `json:"os"`
-					Variant      string `json:"variant,omitempty"`
-				} `json:"platform"`
-				Size int `json:"size"`
-			} `json:"manifests"`
-			MediaType     string `json:"mediaType"`
-			SchemaVersion int    `json:"schemaVersion"`
-			Digest        string `json:"digest"`
-		}
-
-		if err := json.Unmarshal(manifestData, &manifest); err != nil {
-			fmt.Println("Failed to parse manifest:", err)
-		} else {
-			fmt.Println("\n\nSuccessfully unmarshaled manifest data.", manifest)
-		}
-
-		for _, layer := range manifest.Manifests {
-			if err := pullLayer(token, layer.Digest, tempDir, parts[0], layer.MediaType); err != nil {
-				fmt.Println("Failed to pull and extract layer:", err)
-				os.Exit(1)
-			} else {
-				fmt.Println("\n\nSuccessfully pulled and extracted layer: ", layer.Digest)
+	if _, err := os.Stat(imageDir); err != nil {
+		if os.IsNotExist(err) {
+			imageDir, err = ImagePull(image, "./images")
+			if err != nil {
+				logError(err, "Error while pulling the image")
+				os.Exit(255)
 			}
 		}
 	}
 
-	// /tmp/mydocker1515083054/docker-explorer
-	// if _, err := os.Stat(binaryPath); err != nil {
-	// 	fmt.Println("Failed to find executable before chroot:", err)
-	// 	os.Exit(1)
-	// } else {
-	// 	fmt.Println("Executable confirmed before chroot at:", binaryPath)
-	// }
+	command := os.Args[3]
+	args := os.Args[4:len(os.Args)]
 
-	//now that copying of functionality is done, ready to change root
-	if err := syscall.Chroot(tempDir); err != nil {
-		fmt.Println("Failed to chroot:", err)
-		os.Exit(1)
+	// change root filesystem for the child process using chroot
+	// this is necessary to make the child process believe it is running in a different root filesystem
+	// not needed during final task since we are downloading our image
+	IsolatedProcess()
+
+	cmd := exec.Command(command, args...)
+
+	//It will create a process Isolation by creating a new Namespace
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWPID,
+		Chroot:     imageDir, //changed the
+		// this CLONE_NEWPID Unshare the PID namespace, so that the calling
+		// process has a new PID namespace for its children which is
+		// not shared with any previously existing process.  The
+		// calling process is not moved into the new namespace.  The
+		// first child created by the calling process will have the
+		// process ID 1 and will assume the role of init(1) in the
+		// new namespace
 	}
 
-	// Change working directory to the root after chroot because chroot doesn't change directory for us.
-	if err := os.Chdir("/"); err != nil {
-		fmt.Println("Failed to change directory after chroot:", err)
-		os.Exit(1)
-	}
-
-	// viewFS()
-
-	// if _, err := os.Stat(filepath.Base(command)); err != nil {
-	// 	fmt.Println("Failed to find executable in new root:", err)
-	// 	os.Exit(1)
-	// } else {
-	// 	fmt.Println("Executable found, proceeding with execution.")
-	// }
-
-	//Command spawns a new child process. But since it is a child process, it inherits the parents(the current) process' root directory (the temp directory)
-	cmd := exec.Command("/"+filepath.Base(command), args...)
-
+	// bind the standard input, output and error to the parent process
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWPID | syscall.CLONE_NEWNET,
-	}
+	err := cmd.Run()
 
-	if err := cmd.Run(); err != nil {
-		fmt.Println("Command execution failed:", err)
-		os.Exit(cmd.ProcessState.ExitCode())
-	}
-}
-
-func copyFile(src, dst string) error {
-	input, err := os.ReadFile(src)
+	// exit with the same exit code as the child process
 	if err != nil {
-		return err
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			os.Exit(exitError.ExitCode())
+		}
 	}
-	// Ensure executable permissions are correctly set
-	return os.WriteFile(dst, input, 0755)
 }
 
-// func readToTerm(name string) {
-// 	input, _ := os.ReadFile(name)
-// 	fmt.Println(string(input))
-// }
+func IsolatedProcess() {
+	rootFsPath, err := os.MkdirTemp("", "temp_")
+	if err != nil {
+		logError(err, "Failed to create temporary directory")
+	}
+	err = os.Chmod(rootFsPath, 0755)
+	if err != nil {
+		logError(err, "Failed to change permissions of temporary directory")
+	}
 
-// func viewFS() {
-// 	root := "/" // This refers to the new root after chroot
-// 	fmt.Println("Listing files in chroot environment:")
-// 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-// 		if err != nil {
-// 			fmt.Println("Unable to open: ", path)
-// 		} else {
-// 			fmt.Println(path) // Print each path
-// 		}
-// 		return nil
-// 	})
+	defer os.Remove(rootFsPath)
 
-// 	if err != nil {
-// 		fmt.Printf("Error walking the path %q: %v\n", root, err)
-// 	}
-// }
+	binPath := "/usr/local/bin"
+
+	err = os.MkdirAll(path.Join(rootFsPath, binPath), 0755)
+	if err != nil {
+		logError(err, "Failed to create bin directory")
+	}
+
+	//Link command is used to link the existing path with the new path in this case /tmp/temp_*/usr/local/bin/docker-explorer
+	os.Link("/usr/local/bin/docker-explorer", path.Join(rootFsPath, "/usr/local/bin/docker-explorer"))
+	if err != nil {
+		logError(err, "Failed to copy binaries to root file system")
+	}
+
+	err = syscall.Chroot(rootFsPath)
+	if err != nil {
+		logError(err, "Failed to change root filesystem")
+	}
+}
+
+func logError(err error, errorMessage string) {
+	log.Fatalf("%s: %v", errorMessage, err)
+	os.Exit(1)
+}

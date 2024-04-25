@@ -1,133 +1,247 @@
 package main
 
 import (
-	"archive/tar"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
-func getAuthToken(image string) (string, error) {
-	client := &http.Client{}
+const (
+	registryScheme = "https"
+	registry       = "registry.docker.io"
+	registryHost   = "registry.hub.docker.com"
 
-	url := fmt.Sprintf("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/%s:pull", image)
-	req, err := http.NewRequest("GET", url, nil)
+	repository        = "library"
+	manifestMediaType = "application/vnd.docker.distribution.manifest.v2+json"
+	imageManifestType = "application/vnd.oci.image.manifest.v1+json"
+
+	authHostScheme = "https"
+	authHost       = "auth.docker.io"
+)
+
+func getToken(image string) (string, error) {
+	url := fmt.Sprintf("%s://%s/token?service=%s&scope=repository:library/%s:pull", authHostScheme, authHost, registry, image)
+	res, err := http.Get(url)
 	if err != nil {
-		return "", err
+		return "the token get call has an issue", err
 	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("[getToken] Received error : %d", res.StatusCode)
 	}
-	defer resp.Body.Close()
-
 	var data struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	err = json.NewDecoder(res.Body).Decode(&data)
+	if err != nil {
 		return "", err
 	}
-
 	return data.Token, nil
 }
 
-func getImageManifest(token, imageName string, tag string) ([]byte, error) {
-	url := fmt.Sprintf("https://registry.hub.docker.com/v2/library/%s/manifests/%s", imageName, tag)
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	decodeResp, decodeErr := io.ReadAll(resp.Body)
-
-	return decodeResp, decodeErr
+type Manifest struct { //OCI format structure of a manifest
+	Digest    string `json:"digest"`
+	MediaType string `json:"mediaType"`
+	Platform  struct {
+		Architecture string `json:"architecture"`
+		Os           string `json:"os"`
+	} `json:"platform"`
+	Size int `json:"size"`
 }
 
-func pullLayer(token, layerDigest string, dir string, imageName string, mediaType string) error {
-	url := fmt.Sprintf("https://registry.hub.docker.com/v2/library/%s/blobs/%s", imageName, layerDigest)
-
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", mediaType)
-	fmt.Println(token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Printf("\n\nIn pullLayer(): Failed to pull layer: %s, Response: %s\n", resp.Status, string(body))
-		return fmt.Errorf("failed to pull layer, status code: %d", resp.StatusCode)
-	}
-
-	defer resp.Body.Close()
-	fmt.Println("Got layer data from api call: ", resp.Body)
-	// Assuming layer is a tarball
-	// buf := bytes.NewBuffer(body)
-	return extractTarball(resp.Body, dir)
+type Layer struct {
+	Digest    string `json:"digest"`
+	MediaType string `json:"mediaType"`
+	Size      int    `json:"size"`
 }
 
-func extractTarball(tarReader io.Reader, dir string) error {
-	fmt.Println("Starting extraction process...")
-	tr := tar.NewReader(tarReader)
+type LayerResponse struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	MediaType     string `json:"mediaType"`
+	Config        struct {
+		MediaType string `json:"mediaType"`
+		Size      int    `json:"size"`
+		Digest    string `json:"digest"`
+	}
+	Layers []Layer `json:"layers"`
+}
 
-	// Iterate through the files in the tar archive
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break // End of archive
+type ManifestResponse struct {
+	Manifests []Manifest `json:"manifests"`
+	Layers    []Layer    `json:"layers"`
+}
+
+// docker manifest inspect ubuntu:v1  to check the manifest structure
+func getManifests(token string, image string, tag string) (ManifestResponse, error) {
+	url := fmt.Sprintf("%s://%s/v2/library/%s/manifests/%s", registryScheme, registryHost, image, tag)
+
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return ManifestResponse{}, err
+	}
+
+	request.Header.Set("Accept", manifestMediaType)                      // we need to pass this headers so that we can get the media type
+	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token)) //we are passing token as a header
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return ManifestResponse{}, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return ManifestResponse{}, fmt.Errorf("[getManifests] Received status code: %d", response.StatusCode)
+	}
+
+	manifestResponse := ManifestResponse{}
+	err = json.NewDecoder(response.Body).Decode(&manifestResponse) // it filters the manifest from the JSON format
+	if err != nil {
+		return ManifestResponse{}, err
+	}
+
+	return manifestResponse, nil
+}
+
+func getLayers(token string, image string, tag string) (LayerResponse, error) {
+	url := fmt.Sprintf("%s://%s/v2/library/%s/manifests/%s", registryScheme, registryHost, image, tag)
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return LayerResponse{}, err
+	}
+
+	request.Header.Set("Accept", imageManifestType)
+	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return LayerResponse{}, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return LayerResponse{}, fmt.Errorf("[getLayers] Received status code: %d", response.StatusCode)
+	}
+
+	layerResponse := LayerResponse{}
+	err = json.NewDecoder(response.Body).Decode(&layerResponse)
+	if err != nil {
+		return LayerResponse{}, err
+	}
+
+	return layerResponse, nil
+}
+
+func isRuntimePlatformManifest(manifest Manifest) bool { //it checks whether the image is suitable for the system architecture
+	return manifest.Platform.Architecture == runtime.GOARCH && manifest.Platform.Os == runtime.GOOS
+}
+
+func getRuntimeLayerDigest(manifestResponse ManifestResponse) string {
+	for _, manifest := range manifestResponse.Manifests {
+		if isRuntimePlatformManifest(manifest) {
+			return manifest.Digest
 		}
+	}
+
+	return ""
+}
+
+func DownloadLayer(layer Layer, image string, token string, dir string) error {
+	url := fmt.Sprintf("%s://%s/v2/library/%s/blobs/%s", registryScheme, registryHost, image, layer.Digest)
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Accept", imageManifestType)
+	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("[DownloadLayer] Received error code: %d", response.StatusCode)
+	}
+
+	path := filepath.Join(dir, fmt.Sprintf("%s.tar", layer.Digest))
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(file, response.Body)
+	if err != nil {
+		return err
+	}
+
+	return UnTar(dir, path)
+}
+
+func UnTar(dest string, tarfile string) error {
+	cmd := exec.Command("tar", "-xvf", tarfile, "-C", dest)
+	err := cmd.Run()
+	if err != nil {
+		return err
+	}
+
+	return os.Remove(tarfile)
+}
+
+func ParseTag(image string) (string, string) {
+	i := strings.Index(image, ":")
+	if i < 0 {
+		return image, "latest"
+	}
+	return image[:i], image[i+1:]
+}
+
+func ImagePull(image string, dir string) (string, error) {
+	imageName, tag := ParseTag(image)
+
+	token, err := getToken(imageName)
+	if err != nil {
+		panic(err)
+	}
+
+	manifestResponse, err := getManifests(token, imageName, tag)
+	if err != nil {
+		panic(err)
+	}
+
+	runtimeDigest := ""
+	layerResponse := LayerResponse{}
+	if manifestResponse.Manifests == nil {
+		layerResponse = LayerResponse{
+			Layers: manifestResponse.Layers,
+		}
+	} else {
+		runtimeDigest = getRuntimeLayerDigest(manifestResponse)
+		layerResponse, err = getLayers(token, imageName, runtimeDigest)
 		if err != nil {
-			return err
-		}
-
-		// Target location where the dir entry will be created
-		target := filepath.Join(dir, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			// Create directory if it doesn't exist
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			// Create file and write data from tar archive to it
-			outFile, err := os.Create(target)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				outFile.Close()
-				return err
-			}
-			outFile.Close()
-
-			// Set file permissions from tar header
-			if err := os.Chmod(target, os.FileMode(header.Mode)); err != nil {
-				return err
-			}
-		default:
-			fmt.Printf("Unsupported type: %c in %s\n", header.Typeflag, header.Name)
+			panic(err)
 		}
 	}
 
-	return nil
+	imageDirectory := filepath.Join(dir, image)
+	if err := os.MkdirAll(imageDirectory, 0766); err != nil && !os.IsExist(err) {
+		panic(err)
+	}
+
+	for _, layer := range layerResponse.Layers {
+		err = DownloadLayer(layer, imageName, token, imageDirectory)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return imageDirectory, nil
 }
